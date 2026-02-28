@@ -15,7 +15,7 @@ struct ParsedMaterial
 {
     std::string Name;
     std::string DiffuseMap;  // Первая текстура (map_Kd)
-    std::string DiffuseMap2; // Вторая текстура (map_Kd2) - добавили!
+    std::string DiffuseMap2; // Вторая текстура (map_Kd2)
     DirectX::XMFLOAT3 Kd = { 1.0f, 1.0f, 1.0f };
 };
 

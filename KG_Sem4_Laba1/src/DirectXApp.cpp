@@ -881,7 +881,7 @@ bool DirectXApp::Initialize() {
     BuildObj("../assets/sponza.obj");
 
        std::vector<ParsedMaterial> parsed;
-    LoadMTL("../assets/sponza.mtl", parsed);  // или sponza_blend.mtl
+    LoadMTL("../assets/sponza.mtl", parsed);
 
     UINT srvIndex = 0;
 
@@ -1153,7 +1153,6 @@ void DirectXApp::Update(const Timer& gt)
     // ===== TEXTURE ANIMATION =====
     if (mAnimateTextures)
     {
-        // Анимация: UV смещение меняется со временем
         mUVOffsetU += dt * 0.1f;
         mUVOffsetV += dt * 0.05f;
 
@@ -1161,7 +1160,6 @@ void DirectXApp::Update(const Timer& gt)
         if (mUVOffsetV > 1.0f) mUVOffsetV -= 1.0f;
     }
 
-    // Управление тайлингом с клавиатуры
     if (GetAsyncKeyState('1') & 0x8000) mUVScaleU += dt * 2.0f;
     if (GetAsyncKeyState('2') & 0x8000) mUVScaleU -= dt * 2.0f;
     if (GetAsyncKeyState('3') & 0x8000) mUVScaleV += dt * 2.0f;
@@ -1191,7 +1189,6 @@ void DirectXApp::Update(const Timer& gt)
         }
     }
 
-    // Управление с клавиатуры (переопределяет автоматическую анимацию)
     if (GetAsyncKeyState('B') & 0x8000) // B - увеличить blend factor
     {
         mBlendFactor += dt * 2.0f;
@@ -1299,18 +1296,13 @@ void DirectXApp::Draw(const Timer& gt)
             continue;
         }
 
-        // Установить таблицу дескрипторов для текстур (содержит оба SRV)
         D3D12_GPU_DESCRIPTOR_HANDLE srvTableHandle =
             mCbvHeap->GetGPUDescriptorHandleForHeapStart();
 
-        // Сдвигаемся к SRV первой текстуры
         srvTableHandle.ptr += (1 + mat->SrvHeapIndex1) * mCbvSrvUavDescriptorSize;
 
-        // Устанавливаем таблицу дескрипторов для шейдера
-        // Важно: эта таблица должна содержать оба SRV последовательно!
         mCommandList->SetGraphicsRootDescriptorTable(1, srvTableHandle);
 
-        // Рисуем submesh
         mCommandList->DrawIndexedInstanced(
             sm.IndexCount,
             1,
