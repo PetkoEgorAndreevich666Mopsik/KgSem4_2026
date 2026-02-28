@@ -14,8 +14,9 @@ bool LoadOBJ(
 struct ParsedMaterial
 {
     std::string Name;
-    std::string DiffuseMap; // map_Kd
-    DirectX::XMFLOAT3 Kd = { 1.0f, 1.0f, 1.0f }; // ���� �� ���������
+    std::string DiffuseMap;  // Первая текстура (map_Kd)
+    std::string DiffuseMap2; // Вторая текстура (map_Kd2) - добавили!
+    DirectX::XMFLOAT3 Kd = { 1.0f, 1.0f, 1.0f };
 };
 
 bool LoadMTL(

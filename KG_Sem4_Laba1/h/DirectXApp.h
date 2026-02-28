@@ -66,6 +66,9 @@ private:
     float mUVScaleU = 1.0f;
     float mUVScaleV = 1.0f;
     bool mAnimateTextures = false;
+    float mBlendFactor = 0.0f;
+    float mBlendSpeed = 0.5f;  // Скорость интерполяции
+    bool mBlendDirection = true; // true = увеличиваем, false = уменьшаем
 
     std::vector<Submesh> mSubmeshes;
     std::vector<Material> mMaterials;

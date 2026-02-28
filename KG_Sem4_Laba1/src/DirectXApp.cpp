@@ -198,7 +198,10 @@ void DirectXApp::BuildConstantBuffer()
     XMStoreFloat4x4(&objConstants.mWorldViewProj, XMMatrixTranspose(viewProj));
 
     // Initialization UV transform
-    objConstants.mUVTransform = XMFLOAT4(2.0f, 2.0f, 0.0f, 0.0f); // scale 2x для тайлинга
+    objConstants.mUVTransform = XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
+
+    // Initialization blend factor (0.0f = только первая текстура)
+    objConstants.mBlendFactor = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
 
     mObjectCB->CopyData(0, objConstants);
 
@@ -228,26 +231,35 @@ void DirectXApp::BuildRootSignature()
     cbvRange.RegisterSpace = 0;
     cbvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    // ===== SRV range (t0)
-    D3D12_DESCRIPTOR_RANGE srvRange = {};
-    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srvRange.NumDescriptors = 1;
-    srvRange.BaseShaderRegister = 0;
-    srvRange.RegisterSpace = 0;
-    srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    // ===== SRV range (t0 и t1) - ТЕПЕРЬ ДВА ДЕСКРИПТОРА!
+    D3D12_DESCRIPTOR_RANGE srvRange[2] = {};
+
+    // Первая текстура (t0)
+    srvRange[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange[0].NumDescriptors = 1;
+    srvRange[0].BaseShaderRegister = 0;
+    srvRange[0].RegisterSpace = 0;
+    srvRange[0].OffsetInDescriptorsFromTableStart = 0;
+
+    // Вторая текстура (t1)
+    srvRange[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange[1].NumDescriptors = 1;
+    srvRange[1].BaseShaderRegister = 1;
+    srvRange[1].RegisterSpace = 0;
+    srvRange[1].OffsetInDescriptorsFromTableStart = 1;
 
     D3D12_ROOT_PARAMETER rootParameters[2];
 
-    // Slot 0 → CBV
+    // Slot 0 → CBV (b0)
     rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     rootParameters[0].DescriptorTable.NumDescriptorRanges = 1;
     rootParameters[0].DescriptorTable.pDescriptorRanges = &cbvRange;
     rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // Slot 1 → SRV
+    // Slot 1 → SRV (t0 и t1)
     rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rootParameters[1].DescriptorTable.NumDescriptorRanges = 1;
-    rootParameters[1].DescriptorTable.pDescriptorRanges = &srvRange;
+    rootParameters[1].DescriptorTable.NumDescriptorRanges = 2; // ДВА диапазона!
+    rootParameters[1].DescriptorTable.pDescriptorRanges = srvRange;
     rootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     // ===== Static Sampler (s0)
@@ -256,6 +268,7 @@ void DirectXApp::BuildRootSignature()
     sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
     sampler.ShaderRegister = 0;
     sampler.RegisterSpace = 0;
     sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -265,17 +278,22 @@ void DirectXApp::BuildRootSignature()
     rootSigDesc.pParameters = rootParameters;
     rootSigDesc.NumStaticSamplers = 1;
     rootSigDesc.pStaticSamplers = &sampler;
-    rootSigDesc.Flags =
-        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     ComPtr<ID3DBlob> serializedRootSig = nullptr;
     ComPtr<ID3DBlob> errorBlob = nullptr;
 
-    ThrowIfFailed(D3D12SerializeRootSignature(
+    HRESULT hr = D3D12SerializeRootSignature(
         &rootSigDesc,
         D3D_ROOT_SIGNATURE_VERSION_1,
         serializedRootSig.GetAddressOf(),
-        errorBlob.GetAddressOf()));
+        errorBlob.GetAddressOf());
+
+    if (FAILED(hr))
+    {
+        MessageBoxA(nullptr, (char*)errorBlob->GetBufferPointer(), "Root Sig Error", MB_OK);
+        return;
+    }
 
     ThrowIfFailed(device->CreateRootSignature(
         0,
@@ -858,13 +876,12 @@ bool DirectXApp::Initialize() {
 
     CreateViewportAndScissor();
 
-   //Геометрия и ресурсы
+    // Геометрия и ресурсы
     BuildInputLayout();
-   //BuildVertexBuffer();
-   //BuildIndexBuffer();
     BuildObj("../assets/sponza.obj");
-    std::vector<ParsedMaterial> parsed;
-    LoadMTL("../assets/sponza.mtl", parsed);
+
+       std::vector<ParsedMaterial> parsed;
+    LoadMTL("../assets/sponza.mtl", parsed);  // или sponza_blend.mtl
 
     UINT srvIndex = 0;
 
@@ -872,19 +889,56 @@ bool DirectXApp::Initialize() {
     {
         Material mat;
         mat.Name = p.Name;
-        mat.SrvHeapIndex = srvIndex++;
 
+        // Индекс для первой текстуры
+        mat.SrvHeapIndex1 = srvIndex++;
+
+        // Загрузка первой текстуры
         if (!p.DiffuseMap.empty())
         {
             CreateTextureFromTGA(
                 "../assets/" + p.DiffuseMap,
-                mat.DiffuseTexture);
+                mat.DiffuseTexture1);
+
+            // Выводим информацию для отладки
+            std::string msg = "Loaded texture1: " + p.DiffuseMap + " for material: " + p.Name;
+            MessageBoxA(nullptr, msg.c_str(), "Texture Info", MB_OK);
         }
         else
         {
-            CreateColorTexture(p.Kd, mat.DiffuseTexture);
+            CreateColorTexture(p.Kd, mat.DiffuseTexture1);
         }
 
+        // Индекс для второй текстуры
+        mat.SrvHeapIndex2 = srvIndex++;
+
+        // Загрузка второй текстуры
+        if (!p.DiffuseMap2.empty())
+        {
+            CreateTextureFromTGA(
+                "../assets/" + p.DiffuseMap2,
+                mat.DiffuseTexture2);
+
+            std::string msg = "Loaded texture2: " + p.DiffuseMap2 + " for material: " + p.Name;
+            MessageBoxA(nullptr, msg.c_str(), "Texture Info", MB_OK);
+        }
+        else
+        {
+            // Если второй текстуры нет, создаем контрастную цветную текстуру
+            XMFLOAT3 secondColor;
+
+            // Создаем контрастный цвет на основе оригинального
+            secondColor.x = 1.0f - p.Kd.x;  // Инвертируем
+            secondColor.y = 1.0f - p.Kd.y;
+            secondColor.z = 1.0f - p.Kd.z;
+
+            // Или можно сделать красноватый оттенок
+            // secondColor = XMFLOAT3(1.0f, 0.2f, 0.2f);
+
+            CreateColorTexture(secondColor, mat.DiffuseTexture2);
+        }
+
+        // Создаем SRV для первой текстуры
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -894,15 +948,23 @@ bool DirectXApp::Initialize() {
         D3D12_CPU_DESCRIPTOR_HANDLE hDescriptor =
             mCbvHeap->GetCPUDescriptorHandleForHeapStart();
 
-        hDescriptor.ptr += (1 + mat.SrvHeapIndex) * mCbvSrvUavDescriptorSize;
-
+        // SRV для первой текстуры (t0)
+        hDescriptor.ptr += (1 + mat.SrvHeapIndex1) * mCbvSrvUavDescriptorSize;
         device->CreateShaderResourceView(
-            mat.DiffuseTexture.Get(),
+            mat.DiffuseTexture1.Get(),
+            &srvDesc,
+            hDescriptor);
+
+        // SRV для второй текстуры (t1)
+        hDescriptor.ptr += (mat.SrvHeapIndex2 - mat.SrvHeapIndex1) * mCbvSrvUavDescriptorSize;
+        device->CreateShaderResourceView(
+            mat.DiffuseTexture2.Get(),
             &srvDesc,
             hDescriptor);
 
         mMaterials.push_back(mat);
     }
+
     BuildRootSignature();
     BuildShaders();
     BuildPSO();
@@ -939,35 +1001,44 @@ void DirectXApp::OnResize() {
 // Обработка клавиатуры
 void DirectXApp::OnKeyDown(WPARAM wParam)
 {
-    // Проверяем, активное ли наше окно
     HWND activeWindow = GetActiveWindow();
     if (activeWindow != window.GetHwnd()) {
         OutputDebugStringA("Window not active!\n");
         return;
     }
-    // Пробел переключает режим отображения
+
+    // F2 переключает wireframe режим
     if (wParam == VK_F2) {
         mWireframeMode = !mWireframeMode;
-
         if (mWireframeMode) {
-            SetWindowText(window.GetHandle(), L"DirectX 12 Framework - Wireframe Mode (Press SPACE to switch)");
+            SetWindowText(window.GetHandle(), L"DirectX 12 Framework - Wireframe Mode (Press F2 to switch)");
         }
         else {
-            SetWindowText(window.GetHandle(), L"DirectX 12 Framework - Solid Mode (Press SPACE to switch)");
+            SetWindowText(window.GetHandle(), L"DirectX 12 Framework - Solid Mode (Press F2 to switch)");
         }
     }
 
-    // Клавиша T включает/выключает анимацию текстур
+    // T включает/выключает анимацию текстур
     if (wParam == 'T') {
         mAnimateTextures = !mAnimateTextures;
     }
 
-    // Клавиша R сбрасывает UV параметры
+    // R сбрасывает UV параметры
     if (wParam == 'R') {
         mUVScaleU = 1.0f;
         mUVScaleV = 1.0f;
         mUVOffsetU = 0.0f;
         mUVOffsetV = 0.0f;
+    }
+
+    // Пробел переключает направление интерполяции
+    if (wParam == VK_SPACE) {
+        mBlendDirection = !mBlendDirection;
+    }
+
+    // 0 сбрасывает blend factor
+    if (wParam == '0') {
+        mBlendFactor = 0.0f;
     }
 }
 
@@ -1083,10 +1154,9 @@ void DirectXApp::Update(const Timer& gt)
     if (mAnimateTextures)
     {
         // Анимация: UV смещение меняется со временем
-        mUVOffsetU += dt * 0.1f;  // Медленный сдвиг по U
-        mUVOffsetV += dt * 0.05f; // Медленный сдвиг по V
+        mUVOffsetU += dt * 0.1f;
+        mUVOffsetV += dt * 0.05f;
 
-        // Зацикливаем, чтобы не уходило в бесконечность
         if (mUVOffsetU > 1.0f) mUVOffsetU -= 1.0f;
         if (mUVOffsetV > 1.0f) mUVOffsetV -= 1.0f;
     }
@@ -1097,11 +1167,47 @@ void DirectXApp::Update(const Timer& gt)
     if (GetAsyncKeyState('3') & 0x8000) mUVScaleV += dt * 2.0f;
     if (GetAsyncKeyState('4') & 0x8000) mUVScaleV -= dt * 2.0f;
 
-    // Ограничения
     mUVScaleU = max(0.1f, mUVScaleU);
     mUVScaleV = max(0.1f, mUVScaleV);
 
-    // ===== WVP и UV Transform =====
+    // ===== BLEND FACTOR ANIMATION =====
+    // Автоматическая плавная интерполяция между текстурами
+    if (mBlendDirection)
+    {
+        mBlendFactor += dt * mBlendSpeed;
+        if (mBlendFactor >= 1.0f)
+        {
+            mBlendFactor = 1.0f;
+            mBlendDirection = false;
+        }
+    }
+    else
+    {
+        mBlendFactor -= dt * mBlendSpeed;
+        if (mBlendFactor <= 0.0f)
+        {
+            mBlendFactor = 0.0f;
+            mBlendDirection = true;
+        }
+    }
+
+    // Управление с клавиатуры (переопределяет автоматическую анимацию)
+    if (GetAsyncKeyState('B') & 0x8000) // B - увеличить blend factor
+    {
+        mBlendFactor += dt * 2.0f;
+        if (mBlendFactor > 1.0f) mBlendFactor = 1.0f;
+    }
+    if (GetAsyncKeyState('N') & 0x8000) // N - уменьшить blend factor
+    {
+        mBlendFactor -= dt * 2.0f;
+        if (mBlendFactor < 0.0f) mBlendFactor = 0.0f;
+    }
+    if (GetAsyncKeyState('M') & 0x8000) // M - сбросить blend factor
+    {
+        mBlendFactor = 0.0f;
+    }
+
+    // ===== WVP и параметры =====
     XMMATRIX world = XMMatrixIdentity();
     XMMATRIX worldViewProj = world * view * proj;
 
@@ -1109,11 +1215,14 @@ void DirectXApp::Update(const Timer& gt)
     XMStoreFloat4x4(&objConstants.mWorldViewProj,
         XMMatrixTranspose(worldViewProj));
 
-    // Устанавливаем UV transform для тайлинга и анимации
-    objConstants.mUVTransform.x = mUVScaleU;  // scaleU
-    objConstants.mUVTransform.y = mUVScaleV;  // scaleV
-    objConstants.mUVTransform.z = mUVOffsetU; // offsetU
-    objConstants.mUVTransform.w = mUVOffsetV; // offsetV
+    // UV transform
+    objConstants.mUVTransform.x = mUVScaleU;
+    objConstants.mUVTransform.y = mUVScaleV;
+    objConstants.mUVTransform.z = mUVOffsetU;
+    objConstants.mUVTransform.w = mUVOffsetV;
+
+    // Blend factor для интерполяции текстур
+    objConstants.mBlendFactor.x = mBlendFactor;
 
     mObjectCB->CopyData(0, objConstants);
 }
@@ -1172,7 +1281,7 @@ void DirectXApp::Draw(const Timer& gt)
 
     for (auto& sm : mSubmeshes)
     {
-        // 🔎 Найти материал
+        // Найти материал
         Material* mat = nullptr;
 
         for (auto& m : mMaterials)
@@ -1190,20 +1299,18 @@ void DirectXApp::Draw(const Timer& gt)
             continue;
         }
 
-        //if (mat->DiffuseMap.empty())
-        //{
-        //    MessageBoxA(nullptr, mat->Name.c_str(), "NO TEXTURE", MB_OK);
-        //}
-
-        // 📌 Установить SRV конкретного материала
-        D3D12_GPU_DESCRIPTOR_HANDLE srvHandle =
+        // Установить таблицу дескрипторов для текстур (содержит оба SRV)
+        D3D12_GPU_DESCRIPTOR_HANDLE srvTableHandle =
             mCbvHeap->GetGPUDescriptorHandleForHeapStart();
 
-        srvHandle.ptr += (1 + mat->SrvHeapIndex) * mCbvSrvUavDescriptorSize;
+        // Сдвигаемся к SRV первой текстуры
+        srvTableHandle.ptr += (1 + mat->SrvHeapIndex1) * mCbvSrvUavDescriptorSize;
 
-        mCommandList->SetGraphicsRootDescriptorTable(1, srvHandle);
+        // Устанавливаем таблицу дескрипторов для шейдера
+        // Важно: эта таблица должна содержать оба SRV последовательно!
+        mCommandList->SetGraphicsRootDescriptorTable(1, srvTableHandle);
 
-        // 🎨 Нарисовать только этот submesh
+        // Рисуем submesh
         mCommandList->DrawIndexedInstanced(
             sm.IndexCount,
             1,
