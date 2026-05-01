@@ -1091,6 +1091,7 @@ void DirectXApp::Update(const Timer& gt)
     objConstants.mUVTransform = XMFLOAT4(mUVScaleU, mUVScaleV, mUVOffsetU, mUVOffsetV);
     objConstants.mBlendFactor = XMFLOAT4(mBlendFactor, 0, 0, 0);
     mObjectCB->CopyData(0, objConstants);
+    UpdateFallingLights(dt);
 }
 
 void DirectXApp::Draw(const Timer& gt)
@@ -1112,10 +1113,14 @@ void DirectXApp::Draw(const Timer& gt)
         mScissorRect,
         (UINT)mMaterials.size());
 
+    // Объединяем статические и падающие источники
+    std::vector<Light> allLights = mLights;
+    allLights.insert(allLights.end(), mFallingLights.begin(), mFallingLights.end());
+
     mRenderingSystem->LightingPass(
         CurrentBackBuffer(),
         CurrentBackBufferView(),
-        mLights,
+        allLights,  // <-- ВСЕ источники
         mEyePos,
         mScreenViewport,
         mScissorRect,
@@ -1253,6 +1258,67 @@ void DirectXApp::CreateTextureFromTGA(
     mCommandQueue->ExecuteCommandLists(1, cmdLists);
 
     FlushCommandQueue();
+}
+
+// ===== ПАДАЮЩИЕ ИСТОЧНИКИ СВЕТА =====
+void DirectXApp::SpawnFallingLight()
+{
+    // Случайная позиция над сценой
+    float x = (float)(rand() % 1600 - 800) / 100.0f;  // -8..8
+    float z = (float)(rand() % 400 - 200) / 100.0f;    // -2..2
+
+    // Случайный цвет
+    float r = (float)(rand() % 100 + 30) / 100.0f;
+    float g = (float)(rand() % 100 + 30) / 100.0f;
+    float b = (float)(rand() % 100 + 30) / 100.0f;
+
+    XMFLOAT3 spawnPos(x, 8.0f, z);
+    XMFLOAT3 color(r, g, b);
+    float intensity = 10.0f;
+    float range = 3.0f;
+
+    Light fallingLight = Light::CreateFallingLight(spawnPos, color, intensity, range);
+    mFallingLights.push_back(fallingLight);
+}
+
+void DirectXApp::UpdateFallingLights(float dt)
+{
+    if (!mFallingLightsEnabled) return;
+
+    // Обновляем физику всех падающих источников
+    for (auto& light : mFallingLights)
+    {
+        light.Update(dt);
+    }
+
+    // Подсчитываем сколько на полу
+    int groundCount = 0;
+    for (const auto& light : mFallingLights)
+    {
+        if (light.OnGround) groundCount++;
+    }
+
+    // Удаляем старые если превысили лимит
+    while (groundCount > mMaxGroundLights)
+    {
+        for (auto it = mFallingLights.begin(); it != mFallingLights.end(); ++it)
+        {
+            if (it->OnGround)
+            {
+                mFallingLights.erase(it);
+                groundCount--;
+                break;
+            }
+        }
+    }
+
+    // Спавн новых
+    mSpawnTimer += dt;
+    while (mSpawnTimer >= mSpawnInterval)
+    {
+        SpawnFallingLight();
+        mSpawnTimer -= mSpawnInterval;
+    }
 }
 
 void DirectXApp::CreateColorTexture(

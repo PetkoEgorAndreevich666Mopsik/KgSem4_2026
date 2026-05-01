@@ -61,6 +61,16 @@ private:
     std::unique_ptr<RenderingSystem> mRenderingSystem;
     std::unique_ptr<UploadBuffer<LightConstants>> mLightingCB;
 
+    // ===== ДОБАВИТЬ: Падающие источники =====
+    std::vector<Light> mFallingLights;
+    bool mFallingLightsEnabled = true;
+    float mSpawnTimer = 0.0f;
+    float mSpawnInterval = 0.3f;
+    int mMaxGroundLights = 50;
+
+    void UpdateFallingLights(float dt);
+    void SpawnFallingLight();
+
     float mYaw = 0.0f;
     float mPitch = 0.0f;
     float mUVOffsetU = 0.0f;

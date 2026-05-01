@@ -9,7 +9,8 @@ enum LightType
     LIGHT_AMBIENT = 0,
     LIGHT_DIRECTIONAL = 1,
     LIGHT_POINT = 2,
-    LIGHT_SPOT = 3
+    LIGHT_SPOT = 3,
+    LIGHT_FALLING = 4,  // ДОБАВИТЬ
 };
 
 struct Light
@@ -28,11 +29,17 @@ struct Light
     float Range = 10.0f;
 
     // Для spot
-    float SpotAngle = XM_PIDIV4; // 45 градусов
+    float SpotAngle = XM_PIDIV4;
     float SpotFalloff = 1.0f;
 
     // Для ambient
     XMFLOAT3 AmbientColor = XMFLOAT3(0.2f, 0.2f, 0.2f);
+
+    // ===== ДОБАВИТЬ: Для падающих источников =====
+    XMFLOAT3 Velocity = XMFLOAT3(0, 0, 0);
+    float Gravity = 9.8f;
+    float FloorY = -6.0f;
+    bool OnGround = false;
 
     Light() = default;
 
@@ -65,7 +72,7 @@ struct Light
         return light;
     }
 
-    static Light CreateSpotLight(const XMFLOAT3& pos, const XMFLOAT3& dir, const XMFLOAT3& color, 
+    static Light CreateSpotLight(const XMFLOAT3& pos, const XMFLOAT3& dir, const XMFLOAT3& color,
                                   float intensity, float range, float angle)
     {
         Light light;
@@ -78,9 +85,45 @@ struct Light
         light.SpotAngle = angle;
         return light;
     }
+
+    // ===== ДОБАВИТЬ: Фабрика падающего света =====
+    static Light CreateFallingLight(const XMFLOAT3& pos, const XMFLOAT3& color,
+                                     float intensity, float range)
+    {
+        Light light;
+        light.Type = LIGHT_FALLING;
+        light.Position = pos;
+        light.Color = color;
+        light.Intensity = intensity;
+        light.Range = range;
+        light.Velocity = XMFLOAT3(0, 0, 0);
+        light.Gravity = 9.8f;
+        light.FloorY = -6.0f;
+        light.OnGround = false;
+        return light;
+    }
+
+    // ===== ДОБАВИТЬ: Обновление физики =====
+    void Update(float dt)
+    {
+        if (Type != LIGHT_FALLING) return;
+
+        if (!OnGround)
+        {
+            Velocity.y -= Gravity * dt;
+            Position.y += Velocity.y * dt;
+
+            if (Position.y <= FloorY)
+            {
+                Position.y = FloorY;
+                OnGround = true;
+                Velocity = XMFLOAT3(0, 0, 0);
+            }
+        }
+    }
 };
 
-// Структура для Constant Buffer (должна быть 16-байтного выравнивания)
+// Структура для Constant Buffer
 struct LightConstants
 {
     XMFLOAT3 LightPos;
@@ -93,7 +136,7 @@ struct LightConstants
     int LightType;
     XMFLOAT3 CameraPos;
     float Padding;
-    
+
     LightConstants()
     {
         LightPos = XMFLOAT3(0, 0, 0);
@@ -107,7 +150,7 @@ struct LightConstants
         CameraPos = XMFLOAT3(0, 0, 0);
         Padding = 0;
     }
-    
+
     void SetFromLight(const Light& light, const XMFLOAT3& cameraPos)
     {
         LightPos = light.Position;
