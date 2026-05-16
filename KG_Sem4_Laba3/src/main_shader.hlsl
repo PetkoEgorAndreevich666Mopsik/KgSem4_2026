@@ -9,7 +9,8 @@ cbuffer ObjectConstants : register(b0)
     float4x4 gWorld;
     float4x4 gTextureTransform;
     float gTotalTime;
-    float3 gObjectPadding;
+    float3 gTimePadding;
+    float4 gObjectParams;
 };
 
 cbuffer PassConstants : register(b1)
@@ -100,10 +101,10 @@ HSConstants HS_Constants(InputPatch<ControlPoint, 3> patch, uint patchId : SV_Pr
     float3 center = (patch[0].PosW + patch[1].PosW + patch[2].PosW) / 3.0f;
     float distanceToCamera = length(center - gEyePosW);
 
-    float tessFactor = max(1.0, min(8.0, lerp(8.0, 1.0, saturate((distanceToCamera - 0.2) / 1.0))));
-    if (gObjectPadding.z > 0.0f)
+    float tessFactor = max(1.0, min(16.0, lerp(16.0, 2.0, saturate((distanceToCamera - 4.0) / 42.0))));
+    if (gObjectParams.z > 0.0f)
     {
-        tessFactor = max(tessFactor, gObjectPadding.z);
+        tessFactor = max(tessFactor, gObjectParams.z);
     }
 
     hsc.EdgeTess[0] = tessFactor;
@@ -124,6 +125,14 @@ ControlPoint HS_Main(InputPatch<ControlPoint, 3> patch, uint cpId : SV_OutputCon
     return patch[cpId];
 }
 
+float ComputeWaterMask(float3 albedo)
+{
+    float blueDominance = albedo.b - max(albedo.r * 0.72f, albedo.g * 0.9f);
+    float darkSurface = saturate((0.5f - dot(albedo, float3(0.25f, 0.5f, 0.25f))) * 2.1f);
+    float waterMask = saturate((blueDominance + 0.02f) * 10.0f + darkSurface * 0.5f);
+    return saturate(pow(waterMask, 1.35f));
+}
+
 [domain("tri")]
 PixelIn DS_Main(HSConstants hsc, float3 bary : SV_DomainLocation, const OutputPatch<ControlPoint, 3> patch)
 {
@@ -135,13 +144,32 @@ PixelIn DS_Main(HSConstants hsc, float3 bary : SV_DomainLocation, const OutputPa
     float3 bitangentW = normalize(bary.x * patch[0].BitangentW + bary.y * patch[1].BitangentW + bary.z * patch[2].BitangentW);
     float2 texC = bary.x * patch[0].TexC + bary.y * patch[1].TexC + bary.z * patch[2].TexC;
 
-    // Signed displacement around 0.5 level:
-    // 0.5 means neutral, higher pushes out, lower pushes in.
     float height = gDisplacementMap.SampleLevel(gLinearWrap, texC, 0.0f).r;
     float displacement = (height - 0.5f) * 2.0f;
-    float dispStrength = (gObjectPadding.y > 0.0f) ? gObjectPadding.y : 0.2f;
-
+    float dispStrength = (gObjectParams.y > 0.0f) ? gObjectParams.y : 0.2f;
     posW += normalW * (displacement * dispStrength);
+
+    if (gObjectParams.w > 1.5f)
+    {
+        float3 baseAlbedo = gDiffuseMap.SampleLevel(gLinearWrap, texC, 0.0f).rgb;
+        float waterMask = ComputeWaterMask(baseAlbedo);
+
+        float2 waveUv = texC * float2(54.0f, 28.0f);
+        float phase0 = waveUv.x * 1.1f + gTotalTime * 1.8f;
+        float phase1 = waveUv.y * 2.1f - gTotalTime * 2.5f;
+        float phase2 = dot(waveUv, float2(1.2f, 1.55f)) + gTotalTime * 3.2f;
+        float phase3 = dot(waveUv, float2(-1.6f, 0.85f)) - gTotalTime * 2.2f;
+
+        float wave = sin(phase0) * 0.7f + sin(phase1) * 0.48f + sin(phase2) * 0.3f + sin(phase3) * 0.2f;
+        float2 slope;
+        slope.x = cos(phase0) * 0.7f * 1.1f + cos(phase2) * 0.3f * 1.2f - cos(phase3) * 0.2f * 1.6f;
+        slope.y = cos(phase1) * 0.48f * 2.1f + cos(phase2) * 0.3f * 1.55f + cos(phase3) * 0.2f * 0.85f;
+
+        posW += normalW * (wave * 0.042f * waterMask);
+
+        float3 waterNormal = normalize(normalW - tangentW * (slope.x * 0.34f * waterMask) - bitangentW * (slope.y * 0.34f * waterMask));
+        normalW = normalize(lerp(normalW, waterNormal, waterMask));
+    }
 
     outV.PosW = posW;
     outV.NormalW = normalW;
@@ -166,20 +194,30 @@ GBufferOut PS_Geometry(PixelIn pin)
     GBufferOut pout;
 
     float4 albedo = gDiffuseMap.Sample(gLinearWrap, pin.TexC);
-    float3 normalTS = gNormalMap.Sample(gLinearWrap, pin.TexC).xyz * 2.0f - 1.0f;
+    float3 normalW = normalize(pin.NormalW);
 
+    float3 normalTS = gNormalMap.Sample(gLinearWrap, pin.TexC).xyz * 2.0f - 1.0f;
     float3 T = normalize(pin.TangentW);
     float3 B = normalize(pin.BitangentW);
     float3 N = normalize(pin.NormalW);
-
     float3x3 TBN = float3x3(T, B, N);
-    float3 normalW = normalize(mul(normalTS, TBN));
+    normalW = normalize(mul(normalTS, TBN));
 
-    if (gObjectPadding.x >= 1.5f && gObjectPadding.x < 2.5f)
+    if (gObjectParams.w > 1.5f)
+    {
+        float waterMask = ComputeWaterMask(albedo.rgb);
+        float fresnel = pow(1.0f - saturate(dot(normalize(gEyePosW - pin.PosW), normalW)), 3.0f);
+        float waveHighlight = pow(saturate(1.0f - normalW.y), 2.2f);
+        float3 waterTint = lerp(float3(0.01f, 0.09f, 0.19f), float3(0.14f, 0.45f, 0.62f), fresnel);
+        float3 waterColor = albedo.rgb * 0.24f + waterTint + (fresnel * 0.22f + waveHighlight * 0.18f);
+        albedo.rgb = lerp(albedo.rgb, waterColor, saturate(waterMask * 1.15f));
+    }
+
+    if (gObjectParams.x >= 1.5f && gObjectParams.x < 2.5f)
     {
         albedo = float4(normalW * 0.5f + 0.5f, 1.0f);
     }
-    else if (gObjectPadding.x >= 2.5f)
+    else if (gObjectParams.x >= 2.5f)
     {
         float t = saturate((pin.TessFactor - 1.0f) / 7.0f);
         float3 tessColor = lerp(float3(0.1f, 0.2f, 1.0f), float3(1.0f, 0.1f, 0.05f), t);

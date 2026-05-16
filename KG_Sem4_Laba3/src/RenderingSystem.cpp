@@ -37,19 +37,17 @@ void RenderingSystem::OnResize(ID3D12Device* device, unsigned int width, unsigne
 
 void RenderingSystem::BuildRootSignatures(ID3D12Device* device) {
     {
-        CD3DX12_DESCRIPTOR_RANGE ranges[5];
-        ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0); // b0
-        ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 1); // b1
-        ranges[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // t0
-        ranges[3].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1); // t1
-        ranges[4].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2); // t2
+        CD3DX12_DESCRIPTOR_RANGE ranges[3];
+        ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+        ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
+        ranges[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
 
         CD3DX12_ROOT_PARAMETER params[5];
-        params[0].InitAsDescriptorTable(1, &ranges[0], D3D12_SHADER_VISIBILITY_ALL);
-        params[1].InitAsDescriptorTable(1, &ranges[1], D3D12_SHADER_VISIBILITY_ALL);
-        params[2].InitAsDescriptorTable(1, &ranges[2], D3D12_SHADER_VISIBILITY_ALL);
-        params[3].InitAsDescriptorTable(1, &ranges[3], D3D12_SHADER_VISIBILITY_ALL);
-        params[4].InitAsDescriptorTable(1, &ranges[4], D3D12_SHADER_VISIBILITY_ALL);
+        params[0].InitAsConstantBufferView(0);
+        params[1].InitAsConstantBufferView(1);
+        params[2].InitAsDescriptorTable(1, &ranges[0], D3D12_SHADER_VISIBILITY_ALL);
+        params[3].InitAsDescriptorTable(1, &ranges[1], D3D12_SHADER_VISIBILITY_ALL);
+        params[4].InitAsDescriptorTable(1, &ranges[2], D3D12_SHADER_VISIBILITY_ALL);
 
         CD3DX12_STATIC_SAMPLER_DESC linearWrap(
             0,
@@ -84,12 +82,12 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device) {
 
     {
         CD3DX12_DESCRIPTOR_RANGE srvRange;
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0); // t0..t2
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
 
         CD3DX12_ROOT_PARAMETER params[3];
         params[0].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
-        params[1].InitAsConstantBufferView(0); // b0 pass
-        params[2].InitAsConstantBufferView(1); // b1 lighting
+        params[1].InitAsConstantBufferView(0);
+        params[2].InitAsConstantBufferView(1);
 
         CD3DX12_STATIC_SAMPLER_DESC linearClamp(
             0,
@@ -158,8 +156,6 @@ void RenderingSystem::BuildPSOs(ID3D12Device* device) {
     geomDesc.RTVFormats[2] = DXGI_FORMAT_R32_FLOAT;
     geomDesc.DSVFormat = mDepthStencilFormat;
     geomDesc.SampleDesc.Count = 1;
-    //geomDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
-
     ThrowIfFailed(device->CreateGraphicsPipelineState(&geomDesc, IID_PPV_ARGS(&mGeometryPSO)),
                   "Create geometry PSO failed");
 
@@ -174,8 +170,6 @@ void RenderingSystem::BuildPSOs(ID3D12Device* device) {
     tessDesc.DS = {ds->GetBufferPointer(), ds->GetBufferSize()};
     tessDesc.PS = {psGeom->GetBufferPointer(), psGeom->GetBufferSize()};
     tessDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
-    //tessDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
-
     ThrowIfFailed(device->CreateGraphicsPipelineState(&tessDesc, IID_PPV_ARGS(&mTessellationPSO)),
                   "Create tessellation PSO failed");
 

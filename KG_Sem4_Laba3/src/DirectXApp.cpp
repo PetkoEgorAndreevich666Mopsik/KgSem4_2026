@@ -216,7 +216,7 @@ bool LoadWicTextureFromFile12(
     return true;
 }
 
-} // namespace
+}
 
 DirectXApp::DirectXApp() = default;
 
@@ -491,14 +491,16 @@ void DirectXApp::LoadModels() {
         earthPath = "../assets/earth.fbx";
     }
     if (!std::filesystem::exists(earthPath)) {
-        throw std::runtime_error("Earth.fbx not found in ../assets");
+        mEyePos = XMFLOAT3(0.0f, 4.0f, -18.0f);
+        mYaw = 0.0f;
+        mPitch = -0.18f;
+        return;
     }
 
     auto mesh = ModelLoader::LoadModel(
         earthPath.u8string(),
         XMMatrixIdentity());
 
-    // Recenter and normalize Earth size so camera/frustum are always valid.
     XMFLOAT3 vMin(
         std::numeric_limits<float>::max(),
         std::numeric_limits<float>::max(),
@@ -536,8 +538,8 @@ void DirectXApp::LoadModels() {
     const float normalizeScale = (radius > 1e-4f) ? (targetRadius / radius) : 1.0f;
 
     for (auto& v : mesh.vertices) {
-        v.Position.x = (v.Position.x - center.x) * normalizeScale;
-        v.Position.y = (v.Position.y - center.y) * normalizeScale + targetRadius * 0.15f;
+        v.Position.x = (v.Position.x - center.x) * normalizeScale + 8.5f;
+        v.Position.y = (v.Position.y - center.y) * normalizeScale + targetRadius * 0.9f;
         v.Position.z = (v.Position.z - center.z) * normalizeScale;
     }
 
@@ -557,9 +559,9 @@ void DirectXApp::LoadModels() {
           " submeshes=" + std::to_string(mSceneMesh.submeshes.size()) + "\n";
     OutputDebugStringA(msg.c_str());
 
-    mEyePos = XMFLOAT3(0.0f, targetRadius * 0.8f, -targetRadius * 4.5f);
+    mEyePos = XMFLOAT3(0.0f, 4.0f, -18.0f);
     mYaw = 0.0f;
-    mPitch = 0.0f;
+    mPitch = -0.18f;
 }
 
 void DirectXApp::BuildGeometryBuffers() {
@@ -707,7 +709,8 @@ void DirectXApp::CreateFallbackTextures() {
 }
 
 void DirectXApp::BuildConstantBuffers() {
-    mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(mDevice.Get(), 1, true);
+    const unsigned int objectCount = (std::max)(1u, static_cast<unsigned int>(mSceneMesh.submeshes.size()));
+    mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(mDevice.Get(), objectCount, true);
     mPassCB = std::make_unique<UploadBuffer<PassConstants>>(mDevice.Get(), 1, true);
     mLightingCB = std::make_unique<UploadBuffer<LightingConstants>>(mDevice.Get(), LightingCbElementCount, true);
 }
@@ -974,7 +977,7 @@ void DirectXApp::Update(const GameTimer& gt) {
         return std::clamp(v, 0.10f, 16.0f);
     };
 
-    const float tileRate = 1.2f; // units per second
+    const float tileRate = 1.2f;
     float deltaU = 0.0f;
     float deltaV = 0.0f;
 
@@ -1044,7 +1047,6 @@ void DirectXApp::Update(const GameTimer& gt) {
                                                    static_cast<float>(mClientWidth) / static_cast<float>(mClientHeight),
                                                    0.1f,
                                                    5000.0f);
-    const XMMATRIX world = XMMatrixIdentity();
     if (mAnimateTextures) {
         mTexAnimU += 0.04f * gt.DeltaTime();
         mTexAnimV += 0.015f * gt.DeltaTime();
@@ -1055,20 +1057,6 @@ void DirectXApp::Update(const GameTimer& gt) {
             mTexAnimV -= 1.0f;
         }
     }
-    const XMMATRIX texTransform =
-        XMMatrixScaling(mTexScaleU, mTexScaleV, 1.0f) *
-        XMMatrixTranslation(mTexAnimU, mTexAnimV, 0.0f);
-
-    ObjectConstants obj = {};
-    XMStoreFloat4x4(&obj.World, XMMatrixTranspose(world));
-    XMStoreFloat4x4(&obj.WorldViewProj, XMMatrixTranspose(world * view * proj));
-    XMStoreFloat4x4(&obj.TextureTransform, XMMatrixTranspose(texTransform));
-    obj.TotalTime = gt.TotalTime();
-    obj.Padding.x = static_cast<float>(mDebugViewMode);
-    obj.Padding.y = 0.06f;
-    obj.Padding.z = 0.0f;
-    mObjectCB->CopyData(0, obj);
-
     PassConstants pass = {};
     XMMATRIX invViewProj = XMMatrixInverse(nullptr, view * proj);
     XMStoreFloat4x4(&pass.InvViewProj, XMMatrixTranspose(invViewProj));
@@ -1077,7 +1065,7 @@ void DirectXApp::Update(const GameTimer& gt) {
     mPassCB->CopyData(0, pass);
 }
 
-void DirectXApp::Draw(const GameTimer&) {
+void DirectXApp::Draw(const GameTimer& gt) {
     if (mSceneMesh.submeshes.empty() || mSceneMesh.indices.empty() || mSceneMesh.vertices.empty()) {
         OutputDebugStringA("Draw skipped: mesh is empty.\n");
         return;
@@ -1121,16 +1109,49 @@ void DirectXApp::Draw(const GameTimer&) {
 
     mCommandList->SetGraphicsRootSignature(mRenderingSystem->GetGeometryRootSignature());
 
-    mCommandList->SetGraphicsRootDescriptorTable(0, GetGpuSrvHandle(0));
-    mCommandList->SetGraphicsRootDescriptorTable(1, GetGpuSrvHandle(1));
+    mCommandList->SetGraphicsRootConstantBufferView(1, mPassCB->Resource()->GetGPUVirtualAddress());
+
+    const XMVECTOR forward = XMVector3Normalize(XMVectorSet(
+        std::cos(mPitch) * std::sin(mYaw),
+        std::sin(mPitch),
+        std::cos(mPitch) * std::cos(mYaw),
+        0.0f));
+    const XMVECTOR eye = XMLoadFloat3(&mEyePos);
+    const XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    const XMMATRIX view = XMMatrixLookToLH(eye, forward, up);
+    const XMMATRIX proj = XMMatrixPerspectiveFovLH(0.25f * XM_PI,
+                                                   static_cast<float>(mClientWidth) / static_cast<float>(mClientHeight),
+                                                   0.1f,
+                                                   5000.0f);
+    const XMMATRIX world = XMMatrixIdentity();
+    const unsigned int objectElementSize = mObjectCB->GetElementSize();
+    unsigned int objectIndex = 0;
 
     for (const auto& submesh : mSceneMesh.submeshes) {
+        const bool isPlanet = ToLowerAscii(submesh.material.diffuseTextureName) == "earth_alb";
         const bool hasDisplacement = !submesh.material.displacementTextureName.empty() &&
                                      submesh.material.displacementSrvHeapIndex !=
                                          mTextureResources[mFallbackDisplacementIndex].srvHeapIndex;
+        const bool tessellated = hasDisplacement;
         const bool wireframeDebug = (mDebugViewMode == 3);
+        const XMMATRIX texTransform =
+            XMMatrixScaling(mTexScaleU, mTexScaleV, 1.0f) * XMMatrixTranslation(mTexAnimU, mTexAnimV, 0.0f);
 
-        if (hasDisplacement) {
+        ObjectConstants obj = {};
+        XMStoreFloat4x4(&obj.World, XMMatrixTranspose(world));
+        XMStoreFloat4x4(&obj.WorldViewProj, XMMatrixTranspose(world * view * proj));
+        XMStoreFloat4x4(&obj.TextureTransform, XMMatrixTranspose(texTransform));
+        obj.TotalTime = gt.TotalTime();
+        obj.Params.x = static_cast<float>(mDebugViewMode);
+        obj.Params.y = 0.085f;
+        obj.Params.z = isPlanet ? 13.0f : 0.0f;
+        obj.Params.w = isPlanet ? 2.0f : 0.0f;
+        mObjectCB->CopyData(static_cast<int>(objectIndex), obj);
+        mCommandList->SetGraphicsRootConstantBufferView(
+            0,
+            mObjectCB->Resource()->GetGPUVirtualAddress() + static_cast<UINT64>(objectIndex) * objectElementSize);
+
+        if (tessellated) {
             mCommandList->SetPipelineState(wireframeDebug
                                                ? mRenderingSystem->GetTessellationWirePSO()
                                                : mRenderingSystem->GetTessellationPSO());
@@ -1152,6 +1173,7 @@ void DirectXApp::Draw(const GameTimer&) {
             submesh.startIndexLocation,
             submesh.baseVertexLocation,
             0);
+        ++objectIndex;
     }
 
     std::array<D3D12_RESOURCE_BARRIER, GBuffer::Count> toSrv{};
@@ -1187,7 +1209,6 @@ void DirectXApp::Draw(const GameTimer&) {
         return mLightingCB->Resource()->GetGPUVirtualAddress() + static_cast<UINT64>(index) * lightElementSize;
     };
 
-    // Deferred lighting layers with additive blending: ambient + one draw per light.
     LightingConstants ambientConst = {};
     ambientConst.EnableAmbient = 1;
     mLightingCB->CopyData(static_cast<int>(lightCbIndex), ambientConst);

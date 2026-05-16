@@ -21,7 +21,8 @@ struct ObjectConstants {
     XMFLOAT4X4 World = {};
     XMFLOAT4X4 TextureTransform = {};
     float TotalTime = 0.0f;
-    XMFLOAT3 Padding = {0.0f, 0.0f, 0.0f};
+    XMFLOAT3 TimePadding = {0.0f, 0.0f, 0.0f};
+    XMFLOAT4 Params = {0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 struct PassConstants {
@@ -170,7 +171,7 @@ private:
     float mPitch = 0.0f;
     POINT mLastMousePos = {0, 0};
 
-    int mDebugViewMode = 1; // F1: default, F2: world normal debug, F3: tessellation factor + wireframe debug
+    int mDebugViewMode = 1;
     bool mF1WasDown = false;
     bool mF2WasDown = false;
     bool mF3WasDown = false;
