@@ -31,7 +31,6 @@ add_executable(KG_Sem4_Laba1
         src/Window.cpp
         h/Window.h
         h/Light.h
-        h/LightBuffer.h
         h/Gbuffer.h
         src/Gbuffer.cpp
         h/RenderingSystem.h
