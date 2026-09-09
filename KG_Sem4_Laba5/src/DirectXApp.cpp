@@ -1320,9 +1320,9 @@ void DirectXApp::BuildLights() {
 
     LightData dir;
     dir.Type = static_cast<unsigned int>(LightType::Directional);
-    dir.Direction = XMFLOAT3(-0.25f, -1.0f, 0.35f);
+    dir.Direction = mCurrentScene == 1 ? XMFLOAT3(-0.08f, -1.0f, 0.06f) : XMFLOAT3(-0.25f, -1.0f, 0.35f);
     dir.Color = XMFLOAT3(1.0f, 0.97f, 0.92f);
-    dir.Intensity = 1.1f;
+    dir.Intensity = mCurrentScene == 1 ? 2.0f : 1.1f;
     mLights.push_back(dir);
 
     if (mCurrentScene == 0) {
