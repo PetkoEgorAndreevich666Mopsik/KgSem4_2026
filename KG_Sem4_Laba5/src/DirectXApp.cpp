@@ -826,6 +826,47 @@ void DirectXApp::LoadModels() {
 
         AppendMeshData(mSceneMesh, mesh);
 
+        {
+            MeshData cube;
+            cube.vertices.resize(24);
+            cube.indices = {
+                0,1,2, 2,3,0, 4,5,6, 6,7,4, 8,9,10, 10,11,8,
+                12,13,14, 14,15,12, 16,17,18, 18,19,16, 20,21,22, 22,23,20
+            };
+            const float s = 0.5f;
+            const float px = 0.0f;
+            const float py = -1.5f;
+            const float pz = 0.0f;
+            const XMFLOAT3 pos[6][4] = {
+                {{-s+px,py,-s+pz},{s+px,py,-s+pz},{s+px,2*s+py,-s+pz},{-s+px,2*s+py,-s+pz}},
+                {{s+px,py,-s+pz},{s+px,py,s+pz},{s+px,2*s+py,s+pz},{s+px,2*s+py,-s+pz}},
+                {{s+px,py,s+pz},{-s+px,py,s+pz},{-s+px,2*s+py,s+pz},{s+px,2*s+py,s+pz}},
+                {{-s+px,py,s+pz},{-s+px,py,-s+pz},{-s+px,2*s+py,-s+pz},{-s+px,2*s+py,s+pz}},
+                {{-s+px,2*s+py,-s+pz},{s+px,2*s+py,-s+pz},{s+px,2*s+py,s+pz},{-s+px,2*s+py,s+pz}},
+                {{-s+px,py,s+pz},{s+px,py,s+pz},{s+px,py,-s+pz},{-s+px,py,-s+pz}}
+            };
+            const XMFLOAT3 normals[6] = {
+                {0,0,-1},{1,0,0},{0,0,1},{-1,0,0},{0,1,0},{0,-1,0}
+            };
+            for (int face = 0; face < 6; ++face) {
+                for (int vertex = 0; vertex < 4; ++vertex) {
+                    cube.vertices[face * 4 + vertex].Position = pos[face][vertex];
+                    cube.vertices[face * 4 + vertex].Normal = normals[face];
+                    cube.vertices[face * 4 + vertex].TexC = XMFLOAT2(vertex == 0 || vertex == 3 ? 0.0f : 1.0f, vertex < 2 ? 1.0f : 0.0f);
+                }
+            }
+            const unsigned int vertexOffset = static_cast<unsigned int>(mSceneMesh.vertices.size());
+            for (unsigned int& index : cube.indices) {
+                index += vertexOffset;
+            }
+            Submesh submesh;
+            submesh.indexCount = static_cast<unsigned int>(cube.indices.size());
+            submesh.startIndexLocation = static_cast<unsigned int>(mSceneMesh.indices.size());
+            mSceneMesh.vertices.insert(mSceneMesh.vertices.end(), cube.vertices.begin(), cube.vertices.end());
+            mSceneMesh.indices.insert(mSceneMesh.indices.end(), cube.indices.begin(), cube.indices.end());
+            mSceneMesh.submeshes.push_back(submesh);
+        }
+
         mEyePos = XMFLOAT3(0.0f, 3.0f, 0.0f);
         mYaw = 0.0f;
         mPitch = 0.0f;
@@ -1155,7 +1196,7 @@ void DirectXApp::BuildConstantBuffers() {
     const unsigned int objectCount = (std::max)(
         1u,
         static_cast<unsigned int>(mSceneObjects.size() * mSceneMesh.submeshes.size()));
-    mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(mDevice.Get(), objectCount, true);
+    mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(mDevice.Get(), objectCount * (kNumCascades + 1u), true);
     mPassCB = std::make_unique<UploadBuffer<PassConstants>>(mDevice.Get(), 1, true);
     mLightingCB = std::make_unique<UploadBuffer<LightingConstants>>(mDevice.Get(), LightingCbElementCount, true);
     mShadowCB = std::make_unique<UploadBuffer<ShadowConstants>>(mDevice.Get(), 1, true);
@@ -1652,7 +1693,7 @@ void DirectXApp::Update(const GameTimer& gt) {
 
         XMMATRIX subProj = XMMatrixPerspectiveFovLH(0.25f * XM_PI,
             static_cast<float>(mClientWidth) / static_cast<float>(mClientHeight),
-            nearZ, splitFar);
+            splitNear, splitFar);
 
         XMVECTOR frustumCorners[8] = {
             XMVectorSet(-1.0f,  1.0f, 0.0f, 1.0f),
@@ -1665,7 +1706,7 @@ void DirectXApp::Update(const GameTimer& gt) {
             XMVectorSet( 1.0f, -1.0f, 1.0f, 1.0f),
         };
 
-        XMMATRIX invSubProj = XMMatrixInverse(nullptr, subProj * view);
+        XMMATRIX invSubProj = XMMatrixInverse(nullptr, view * subProj);
         for (auto& corner : frustumCorners) {
             corner = XMVector4Transform(corner, invSubProj);
             corner = XMVectorDivide(corner, XMVectorSplatW(corner));
@@ -1687,6 +1728,13 @@ void DirectXApp::Update(const GameTimer& gt) {
         XMVECTOR lightDir = XMVector3Normalize(XMLoadFloat3(&mLights[0].Direction));
         XMVECTOR lightPos = XMVectorSubtract(center, XMVectorScale(lightDir, radius * 2.0f));
         XMMATRIX lightView = XMMatrixLookAtLH(lightPos, center, XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f));
+
+        const float texelWorldSize = (2.0f * radius) / static_cast<float>(kShadowMapSize);
+        XMVECTOR centerLightSpace = XMVector3TransformCoord(center, lightView);
+        const float offsetX = std::floor(XMVectorGetX(centerLightSpace) / texelWorldSize) * texelWorldSize - XMVectorGetX(centerLightSpace);
+        const float offsetY = std::floor(XMVectorGetY(centerLightSpace) / texelWorldSize) * texelWorldSize - XMVectorGetY(centerLightSpace);
+        XMMATRIX snap = XMMatrixTranslation(offsetX, offsetY, 0.0f);
+        lightView = lightView * snap;
 
         float l = -radius;
         float r = radius;
@@ -1763,10 +1811,11 @@ void DirectXApp::Draw(const GameTimer& gt) {
                 static_cast<float>(mClientWidth) / static_cast<float>(mClientHeight),
                 CameraNearZ, CameraFarZ);
 
-            const XMMATRIX cascadeViewProj = XMLoadFloat4x4(&mCascadeViewProj[cascade]);
-
-            unsigned int shadowCbIdx = 0;
-            for (unsigned int sceneObjectIndex : mVisibleObjectIndices) {
+            const XMMATRIX cascadeViewProj = XMMatrixTranspose(XMLoadFloat4x4(&mCascadeViewProj[cascade]));
+            const unsigned int shadowObjectCount = static_cast<unsigned int>(mSceneObjects.size() * mSceneMesh.submeshes.size());
+            const unsigned int shadowCbBase = shadowObjectCount * (cascade + 1u);
+            unsigned int shadowCbIdx = shadowCbBase;
+            for (unsigned int sceneObjectIndex = 0; sceneObjectIndex < mSceneObjects.size(); ++sceneObjectIndex) {
                 const auto& sceneObject = mSceneObjects[sceneObjectIndex];
                 const XMMATRIX world = XMLoadFloat4x4(&sceneObject.world);
 

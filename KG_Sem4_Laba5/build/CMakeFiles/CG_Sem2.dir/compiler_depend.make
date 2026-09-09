@@ -4,6 +4,9 @@
 CMakeFiles\CG_Sem2.dir\src\DDSTextureLoader.cpp.obj: D:\KgSem4_2026\KG_Sem4_Laba5\src\DDSTextureLoader.cpp
 
 
+CMakeFiles\CG_Sem2.dir\src\DirectXApp.cpp.obj: D:\KgSem4_2026\KG_Sem4_Laba5\src\DirectXApp.cpp
+
+
 CMakeFiles\CG_Sem2.dir\src\GBuffer.cpp.obj: D:\KgSem4_2026\KG_Sem4_Laba5\src\GBuffer.cpp
 
 
@@ -29,6 +32,8 @@ CMakeFiles\CG_Sem2.dir\src\model_loader.cpp.obj: D:\KgSem4_2026\KG_Sem4_Laba5\sr
 D:\KgSem4_2026\KG_Sem4_Laba5\src\RenderingSystem.cpp:
 
 D:\KgSem4_2026\KG_Sem4_Laba5\src\DDSTextureLoader.cpp:
+
+D:\KgSem4_2026\KG_Sem4_Laba5\src\DirectXApp.cpp:
 
 D:\KgSem4_2026\KG_Sem4_Laba5\src\main.cpp:
 

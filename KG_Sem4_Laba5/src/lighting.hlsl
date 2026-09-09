@@ -112,7 +112,7 @@ float3 ComputeSpot(float3 P, float3 N, float3 albedo, LightData light)
     return albedo * light.Color * (light.Intensity * ndotl * atten * spot);
 }
 
-float ComputeShadowFactor(float3 worldPos, float viewDepth)
+float ComputeShadowFactor(float3 worldPos, float3 normalW, float viewDepth)
 {
     int cascadeIndex = kNumCascades - 1;
     for (int i = 0; i < kNumCascades - 1; ++i)
@@ -136,6 +136,9 @@ float ComputeShadowFactor(float3 worldPos, float viewDepth)
         return 1.0f;
     }
 
+    float3 lightDirection = normalize(-gLightDirection.xyz);
+    float ndotl = saturate(dot(normalW, lightDirection));
+    float bias = (0.00005f + (1.0f - ndotl) * 0.00025f) * (1.0f + 0.18f * cascadeIndex);
     float shadow = 0.0f;
     float2 texelSize = 1.0f / kShadowMapSize;
 
@@ -147,7 +150,7 @@ float ComputeShadowFactor(float3 worldPos, float viewDepth)
             shadow += gShadowMap.SampleCmpLevelZero(
                 gShadowSampler,
                 float3(projCoords.xy + offset, (float)cascadeIndex),
-                projCoords.z - kBias);
+                saturate(projCoords.z - bias));
         }
     }
 
@@ -187,8 +190,10 @@ float4 PS_Lighting(VSOut pin) : SV_Target
 
         if (gLight.Type == 0)
         {
-            float viewDepth = depth * 260.0f;
-            float shadow = ComputeShadowFactor(worldPos, viewDepth);
+            const float nearZ = 0.1f;
+            const float farZ = 260.0f;
+            float viewDepth = nearZ * farZ / (farZ - depth * (farZ - nearZ));
+            float shadow = ComputeShadowFactor(worldPos, normalW, viewDepth);
             color *= shadow;
         }
     }

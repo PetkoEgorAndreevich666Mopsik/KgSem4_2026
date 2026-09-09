@@ -257,10 +257,10 @@ void RenderingSystem::BuildPSOs(ID3D12Device* device) {
     shadowDesc.VS = {vsShadow->GetBufferPointer(), vsShadow->GetBufferSize()};
     shadowDesc.PS = {nullptr, 0};
     shadowDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-    shadowDesc.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
-    shadowDesc.RasterizerState.DepthBias = 10000;
+    shadowDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    shadowDesc.RasterizerState.DepthBias = 0;
     shadowDesc.RasterizerState.DepthBiasClamp = 0.0f;
-    shadowDesc.RasterizerState.SlopeScaledDepthBias = 1.5f;
+    shadowDesc.RasterizerState.SlopeScaledDepthBias = 0.0f;
     shadowDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     shadowDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     shadowDesc.DepthStencilState.DepthEnable = TRUE;
