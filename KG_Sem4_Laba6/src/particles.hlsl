@@ -133,7 +133,7 @@ void CS_UpdateParticles(uint3 dispatchThreadId : SV_DispatchThreadID)
         p.Age = 0.0f;
 
         p.Size = gBaseSize * lerp(0.75f, 1.25f, Hash01(seed * 13u + 59u));
-        p.Color = float4(0.9f, 0.6f, 0.25f, 1.0f);
+        p.Color = float4(1.0f, 0.35f, 0.72f, 1.0f);
         p.Padding = 0.0f.xxx;
 
         gAppendParticles.Append(p);
