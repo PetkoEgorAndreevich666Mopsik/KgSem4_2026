@@ -911,11 +911,11 @@ void DirectXApp::CreateFallbackTextures() {
 }
 
 void DirectXApp::BuildConstantBuffers() {
-    const unsigned int objectCount = (std::max)(
+    const unsigned int objectCountPerView = (std::max)(
         1u,
         static_cast<unsigned int>(mSceneObjects.size() * mSceneMesh.submeshes.size()));
-    mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(mDevice.Get(), objectCount, true);
-    mPassCB = std::make_unique<UploadBuffer<PassConstants>>(mDevice.Get(), 1, true);
+    mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(mDevice.Get(), objectCountPerView * 2u, true);
+    mPassCB = std::make_unique<UploadBuffer<PassConstants>>(mDevice.Get(), 2, true);
     mLightingCB = std::make_unique<UploadBuffer<LightingConstants>>(mDevice.Get(), LightingCbElementCount, true);
 }
 
@@ -1301,37 +1301,22 @@ void DirectXApp::Draw(const GameTimer& gt) {
     mCommandList->SetDescriptorHeaps(1, descriptorHeaps);
 
     auto* gbuffer = mRenderingSystem->GetGBuffer();
-
-    std::array<D3D12_RESOURCE_BARRIER, GBuffer::Count> toRT{};
-    for (unsigned int i = 0; i < GBuffer::Count; ++i) {
-        toRT[i] = CD3DX12_RESOURCE_BARRIER::Transition(
-            gbuffer->GetTexture(static_cast<GBuffer::TextureType>(i)),
-            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-            D3D12_RESOURCE_STATE_RENDER_TARGET);
-    }
-    mCommandList->ResourceBarrier(static_cast<UINT>(toRT.size()), toRT.data());
-
     D3D12_CPU_DESCRIPTOR_HANDLE gbuffRtvs[3] = {
         gbuffer->GetRtv(GBuffer::Albedo),
         gbuffer->GetRtv(GBuffer::Normal),
         gbuffer->GetRtv(GBuffer::Depth)
     };
 
-    mCommandList->RSSetViewports(1, &mScreenViewport);
-    mCommandList->RSSetScissorRects(1, &mScissorRect);
-
-    gbuffer->Clear(mCommandList.Get());
-    mCommandList->ClearDepthStencilView(DepthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
-                                        1.0f, 0, 0, nullptr);
-
-    auto dsv = DepthStencilView();
-    mCommandList->OMSetRenderTargets(3, gbuffRtvs, FALSE, &dsv);
-    mCommandList->IASetVertexBuffers(0, 1, &mVertexBufferView);
-    mCommandList->IASetIndexBuffer(&mIndexBufferView);
-
-    mCommandList->SetGraphicsRootSignature(mRenderingSystem->GetGeometryRootSignature());
-
-    mCommandList->SetGraphicsRootConstantBufferView(1, mPassCB->Resource()->GetGPUVirtualAddress());
+    const auto transitionGBuffer = [&](D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+        std::array<D3D12_RESOURCE_BARRIER, GBuffer::Count> barriers{};
+        for (unsigned int i = 0; i < GBuffer::Count; ++i) {
+            barriers[i] = CD3DX12_RESOURCE_BARRIER::Transition(
+                gbuffer->GetTexture(static_cast<GBuffer::TextureType>(i)),
+                before,
+                after);
+        }
+        mCommandList->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+    };
 
     const XMVECTOR forward = XMVector3Normalize(XMVectorSet(
         std::cos(mPitch) * std::sin(mYaw),
@@ -1389,70 +1374,229 @@ void DirectXApp::Draw(const GameTimer& gt) {
     mLastDrawCallCount = mLastVisibleObjectCount * static_cast<unsigned int>(mSceneMesh.submeshes.size());
 
     const unsigned int objectElementSize = mObjectCB->GetElementSize();
-    unsigned int objectCbIndex = 0;
+    const unsigned int passElementSize = mPassCB->GetElementSize();
+    const unsigned int objectCountPerView = (std::max)(
+        1u,
+        static_cast<unsigned int>(mSceneObjects.size() * mSceneMesh.submeshes.size()));
+    const auto passCbAddress = [&](unsigned int passIndex) -> D3D12_GPU_VIRTUAL_ADDRESS {
+        return mPassCB->Resource()->GetGPUVirtualAddress() + static_cast<UINT64>(passIndex) * passElementSize;
+    };
+    const auto objectCbAddress = [&](unsigned int objectCbIndex) -> D3D12_GPU_VIRTUAL_ADDRESS {
+        return mObjectCB->Resource()->GetGPUVirtualAddress() + static_cast<UINT64>(objectCbIndex) * objectElementSize;
+    };
 
-    for (unsigned int sceneObjectIndex : mVisibleObjectIndices) {
-        const auto& sceneObject = mSceneObjects[sceneObjectIndex];
-        const XMMATRIX world = XMLoadFloat4x4(&sceneObject.world);
+    const auto writePassConstants = [&](unsigned int passIndex,
+                                        const XMMATRIX& passView,
+                                        const XMMATRIX& passProj,
+                                        const XMFLOAT3& eyePos) {
+        PassConstants pass = {};
+        XMMATRIX invViewProj = XMMatrixInverse(nullptr, passView * passProj);
+        XMStoreFloat4x4(&pass.InvViewProj, XMMatrixTranspose(invViewProj));
+        pass.EyePosW = eyePos;
+        pass.AmbientColor = XMFLOAT4(0.08f, 0.08f, 0.1f, 1.0f);
+        mPassCB->CopyData(static_cast<int>(passIndex), pass);
+    };
 
-        for (const auto& submesh : mSceneMesh.submeshes) {
-            const bool hasDisplacement = !submesh.material.displacementTextureName.empty() &&
-                                         submesh.material.displacementSrvHeapIndex !=
-                                             mTextureResources[mFallbackDisplacementIndex].srvHeapIndex;
-            const bool tessellated = hasDisplacement;
-            const bool wireframeDebug = (mDebugViewMode == 3);
-            const XMMATRIX texTransform =
-                XMMatrixScaling(mTexScaleU, mTexScaleV, 1.0f) * XMMatrixTranslation(mTexAnimU, mTexAnimV, 0.0f);
+    const auto renderGeometryPass = [&](const D3D12_VIEWPORT& viewport,
+                                        const D3D12_RECT& scissor,
+                                        const XMMATRIX& passView,
+                                        const XMMATRIX& passProj,
+                                        unsigned int passIndex,
+                                        unsigned int objectCbOffset) {
+        mCommandList->RSSetViewports(1, &viewport);
+        mCommandList->RSSetScissorRects(1, &scissor);
 
-            ObjectConstants obj = {};
-            XMStoreFloat4x4(&obj.World, XMMatrixTranspose(world));
-            XMStoreFloat4x4(&obj.WorldViewProj, XMMatrixTranspose(world * view * proj));
-            XMStoreFloat4x4(&obj.TextureTransform, XMMatrixTranspose(texTransform));
-            obj.TotalTime = mAnimateTextures ? gt.TotalTime() : 0.0f;
-            obj.Params.x = static_cast<float>(mDebugViewMode);
-            obj.Params.y = 0.085f;
-            obj.Params.z = 0.0f;
-            obj.Params.w = 0.0f;
-            mObjectCB->CopyData(static_cast<int>(objectCbIndex), obj);
-            mCommandList->SetGraphicsRootConstantBufferView(
-                0,
-                mObjectCB->Resource()->GetGPUVirtualAddress() +
-                    static_cast<UINT64>(objectCbIndex) * objectElementSize);
+        gbuffer->Clear(mCommandList.Get());
+        mCommandList->ClearDepthStencilView(DepthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+                                            1.0f, 0, 0, nullptr);
 
-            if (tessellated) {
-                mCommandList->SetPipelineState(wireframeDebug
-                                                   ? mRenderingSystem->GetTessellationWirePSO()
-                                                   : mRenderingSystem->GetTessellationPSO());
-                mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
-            } else {
-                mCommandList->SetPipelineState(wireframeDebug
-                                                   ? mRenderingSystem->GetGeometryWirePSO()
-                                                   : mRenderingSystem->GetGeometryPSO());
-                mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        auto dsv = DepthStencilView();
+        mCommandList->OMSetRenderTargets(3, gbuffRtvs, FALSE, &dsv);
+        mCommandList->IASetVertexBuffers(0, 1, &mVertexBufferView);
+        mCommandList->IASetIndexBuffer(&mIndexBufferView);
+
+        mCommandList->SetGraphicsRootSignature(mRenderingSystem->GetGeometryRootSignature());
+        mCommandList->SetGraphicsRootConstantBufferView(1, passCbAddress(passIndex));
+
+        unsigned int objectCbIndex = objectCbOffset;
+
+        for (unsigned int sceneObjectIndex : mVisibleObjectIndices) {
+            const auto& sceneObject = mSceneObjects[sceneObjectIndex];
+            const XMMATRIX world = XMLoadFloat4x4(&sceneObject.world);
+
+            for (const auto& submesh : mSceneMesh.submeshes) {
+                const bool hasDisplacement = !submesh.material.displacementTextureName.empty() &&
+                                             submesh.material.displacementSrvHeapIndex !=
+                                                 mTextureResources[mFallbackDisplacementIndex].srvHeapIndex;
+                const bool tessellated = hasDisplacement;
+                const bool wireframeDebug = (mDebugViewMode == 3);
+                const XMMATRIX texTransform =
+                    XMMatrixScaling(mTexScaleU, mTexScaleV, 1.0f) * XMMatrixTranslation(mTexAnimU, mTexAnimV, 0.0f);
+
+                ObjectConstants obj = {};
+                XMStoreFloat4x4(&obj.World, XMMatrixTranspose(world));
+                XMStoreFloat4x4(&obj.WorldViewProj, XMMatrixTranspose(world * passView * passProj));
+                XMStoreFloat4x4(&obj.TextureTransform, XMMatrixTranspose(texTransform));
+                obj.TotalTime = mAnimateTextures ? gt.TotalTime() : 0.0f;
+                obj.Params.x = static_cast<float>(mDebugViewMode);
+                obj.Params.y = 0.085f;
+                obj.Params.z = 0.0f;
+                obj.Params.w = 0.0f;
+                mObjectCB->CopyData(static_cast<int>(objectCbIndex), obj);
+                mCommandList->SetGraphicsRootConstantBufferView(0, objectCbAddress(objectCbIndex));
+
+                if (tessellated) {
+                    mCommandList->SetPipelineState(wireframeDebug
+                                                       ? mRenderingSystem->GetTessellationWirePSO()
+                                                       : mRenderingSystem->GetTessellationPSO());
+                    mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+                } else {
+                    mCommandList->SetPipelineState(wireframeDebug
+                                                       ? mRenderingSystem->GetGeometryWirePSO()
+                                                       : mRenderingSystem->GetGeometryPSO());
+                    mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                }
+
+                mCommandList->SetGraphicsRootDescriptorTable(2, GetGpuSrvHandle(submesh.material.diffuseSrvHeapIndex));
+                mCommandList->SetGraphicsRootDescriptorTable(3, GetGpuSrvHandle(submesh.material.normalSrvHeapIndex));
+                mCommandList->SetGraphicsRootDescriptorTable(4, GetGpuSrvHandle(submesh.material.displacementSrvHeapIndex));
+
+                mCommandList->DrawIndexedInstanced(
+                    submesh.indexCount,
+                    1,
+                    submesh.startIndexLocation,
+                    submesh.baseVertexLocation,
+                    0);
+                ++objectCbIndex;
+            }
+        }
+    };
+
+    const unsigned int lightElementSize = mLightingCB->GetElementSize();
+    const auto lightingCbAddress = [&](unsigned int index) -> D3D12_GPU_VIRTUAL_ADDRESS {
+        return mLightingCB->Resource()->GetGPUVirtualAddress() + static_cast<UINT64>(index) * lightElementSize;
+    };
+
+    const auto renderLightingPass = [&](const D3D12_VIEWPORT& viewport,
+                                        const D3D12_RECT& scissor,
+                                        unsigned int passIndex,
+                                        bool clearBackBuffer) {
+        mCommandList->RSSetViewports(1, &viewport);
+        mCommandList->RSSetScissorRects(1, &scissor);
+
+        auto rtv = CurrentBackBufferView();
+        const float clearColor[] = {0.0f, 0.0f, 0.0f, 1.0f};
+        if (clearBackBuffer) {
+            mCommandList->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
+        } else {
+            mCommandList->ClearRenderTargetView(rtv, clearColor, 1, &scissor);
+        }
+        mCommandList->OMSetRenderTargets(1, &rtv, TRUE, nullptr);
+
+        mCommandList->SetPipelineState(mRenderingSystem->GetLightingPSO());
+        mCommandList->SetGraphicsRootSignature(mRenderingSystem->GetLightingRootSignature());
+        mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        mCommandList->SetGraphicsRootDescriptorTable(0, GetGpuSrvHandle(mGBufferSrvStart));
+        mCommandList->SetGraphicsRootConstantBufferView(1, passCbAddress(passIndex));
+
+        unsigned int lightCbIndex = 0;
+
+        LightingConstants ambientConst = {};
+        ambientConst.EnableAmbient = 1;
+        mLightingCB->CopyData(static_cast<int>(lightCbIndex), ambientConst);
+        mCommandList->SetGraphicsRootConstantBufferView(2, lightingCbAddress(lightCbIndex));
+        mCommandList->DrawInstanced(3, 1, 0, 0);
+        ++lightCbIndex;
+
+        for (const auto& light : mLights) {
+            if (lightCbIndex >= LightingCbElementCount) {
+                break;
             }
 
-            mCommandList->SetGraphicsRootDescriptorTable(2, GetGpuSrvHandle(submesh.material.diffuseSrvHeapIndex));
-            mCommandList->SetGraphicsRootDescriptorTable(3, GetGpuSrvHandle(submesh.material.normalSrvHeapIndex));
-            mCommandList->SetGraphicsRootDescriptorTable(4, GetGpuSrvHandle(submesh.material.displacementSrvHeapIndex));
-
-            mCommandList->DrawIndexedInstanced(
-                submesh.indexCount,
-                1,
-                submesh.startIndexLocation,
-                submesh.baseVertexLocation,
-                0);
-            ++objectCbIndex;
+            LightingConstants lightConst = {};
+            lightConst.EnableAmbient = 0;
+            lightConst.Light = light;
+            mLightingCB->CopyData(static_cast<int>(lightCbIndex), lightConst);
+            mCommandList->SetGraphicsRootConstantBufferView(2, lightingCbAddress(lightCbIndex));
+            mCommandList->DrawInstanced(3, 1, 0, 0);
+            ++lightCbIndex;
         }
+
+        for (const auto& fl : mFallingLights) {
+            if (lightCbIndex >= LightingCbElementCount) {
+                break;
+            }
+
+            LightingConstants lightConst = {};
+            lightConst.EnableAmbient = 0;
+            lightConst.Light.Type = static_cast<unsigned int>(LightType::Point);
+            lightConst.Light.Position = fl.position;
+            lightConst.Light.Color = fl.color;
+            lightConst.Light.Intensity = fl.intensity;
+            lightConst.Light.Range = fl.range;
+            mLightingCB->CopyData(static_cast<int>(lightCbIndex), lightConst);
+            mCommandList->SetGraphicsRootConstantBufferView(2, lightingCbAddress(lightCbIndex));
+            mCommandList->DrawInstanced(3, 1, 0, 0);
+            ++lightCbIndex;
+        }
+    };
+
+    XMFLOAT3 overviewMin(
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max());
+    XMFLOAT3 overviewMax(
+        -std::numeric_limits<float>::max(),
+        -std::numeric_limits<float>::max(),
+        -std::numeric_limits<float>::max());
+
+    for (const auto& object : mSceneObjects) {
+        overviewMin.x = (std::min)(overviewMin.x, object.bounds.Center.x - object.bounds.Radius);
+        overviewMin.y = (std::min)(overviewMin.y, object.bounds.Center.y - object.bounds.Radius);
+        overviewMin.z = (std::min)(overviewMin.z, object.bounds.Center.z - object.bounds.Radius);
+        overviewMax.x = (std::max)(overviewMax.x, object.bounds.Center.x + object.bounds.Radius);
+        overviewMax.y = (std::max)(overviewMax.y, object.bounds.Center.y + object.bounds.Radius);
+        overviewMax.z = (std::max)(overviewMax.z, object.bounds.Center.z + object.bounds.Radius);
     }
 
-    std::array<D3D12_RESOURCE_BARRIER, GBuffer::Count> toSrv{};
-    for (unsigned int i = 0; i < GBuffer::Count; ++i) {
-        toSrv[i] = CD3DX12_RESOURCE_BARRIER::Transition(
-            gbuffer->GetTexture(static_cast<GBuffer::TextureType>(i)),
-            D3D12_RESOURCE_STATE_RENDER_TARGET,
-            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    }
-    mCommandList->ResourceBarrier(static_cast<UINT>(toSrv.size()), toSrv.data());
+    const XMFLOAT3 overviewCenter(
+        0.5f * (overviewMin.x + overviewMax.x),
+        0.5f * (overviewMin.y + overviewMax.y),
+        0.5f * (overviewMin.z + overviewMax.z));
+    const float overviewSpan = (std::max)(overviewMax.x - overviewMin.x, overviewMax.z - overviewMin.z) * 1.08f;
+    const XMFLOAT3 overviewEye(overviewCenter.x, overviewMax.y + overviewSpan, overviewCenter.z);
+    const XMMATRIX overviewView = XMMatrixLookToLH(
+        XMLoadFloat3(&overviewEye),
+        XMVectorSet(0.0f, -1.0f, 0.0f, 0.0f),
+        XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f));
+    const XMMATRIX overviewProj = XMMatrixOrthographicLH(overviewSpan, overviewSpan, 0.1f, overviewSpan * 2.2f);
+
+    const float margin = 18.0f;
+    const float overviewSize = std::clamp(static_cast<float>((std::min)(mClientWidth, mClientHeight)) * 0.30f,
+                                          180.0f,
+                                          300.0f);
+    D3D12_VIEWPORT overviewViewport = {};
+    overviewViewport.TopLeftX = (std::max)(margin, static_cast<float>(mClientWidth) - overviewSize - margin);
+    overviewViewport.TopLeftY = (std::max)(margin, static_cast<float>(mClientHeight) - overviewSize - margin);
+    overviewViewport.Width = overviewSize;
+    overviewViewport.Height = overviewSize;
+    overviewViewport.MinDepth = 0.0f;
+    overviewViewport.MaxDepth = 1.0f;
+
+    D3D12_RECT overviewScissor = {
+        static_cast<LONG>(overviewViewport.TopLeftX),
+        static_cast<LONG>(overviewViewport.TopLeftY),
+        static_cast<LONG>(overviewViewport.TopLeftX + overviewViewport.Width),
+        static_cast<LONG>(overviewViewport.TopLeftY + overviewViewport.Height)
+    };
+
+    writePassConstants(0, view, proj, mEyePos);
+    writePassConstants(1, overviewView, overviewProj, overviewEye);
+
+    transitionGBuffer(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    renderGeometryPass(mScreenViewport, mScissorRect, view, proj, 0, 0);
+    transitionGBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     auto bbToRt = CD3DX12_RESOURCE_BARRIER::Transition(
         CurrentBackBuffer(),
@@ -1460,62 +1604,33 @@ void DirectXApp::Draw(const GameTimer& gt) {
         D3D12_RESOURCE_STATE_RENDER_TARGET);
     mCommandList->ResourceBarrier(1, &bbToRt);
 
-    const float clearColor[] = {0.0f, 0.0f, 0.0f, 1.0f};
+    renderLightingPass(mScreenViewport, mScissorRect, 0, true);
+
+    transitionGBuffer(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    renderGeometryPass(mScreenViewport, mScissorRect, overviewView, overviewProj, 1, objectCountPerView);
+    transitionGBuffer(D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    renderLightingPass(overviewViewport, overviewScissor, 1, false);
+
     auto rtv = CurrentBackBufferView();
-    mCommandList->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
-    mCommandList->OMSetRenderTargets(1, &rtv, TRUE, nullptr);
-
-    mCommandList->SetPipelineState(mRenderingSystem->GetLightingPSO());
-    mCommandList->SetGraphicsRootSignature(mRenderingSystem->GetLightingRootSignature());
-    mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-    mCommandList->SetGraphicsRootDescriptorTable(0, GetGpuSrvHandle(mGBufferSrvStart));
-    mCommandList->SetGraphicsRootConstantBufferView(1, mPassCB->Resource()->GetGPUVirtualAddress());
-
-    const unsigned int lightElementSize = mLightingCB->GetElementSize();
-    unsigned int lightCbIndex = 0;
-    const auto lightingCbAddress = [&](unsigned int index) -> D3D12_GPU_VIRTUAL_ADDRESS {
-        return mLightingCB->Resource()->GetGPUVirtualAddress() + static_cast<UINT64>(index) * lightElementSize;
+    const float borderColor[] = {0.12f, 0.45f, 1.0f, 1.0f};
+    constexpr LONG borderThickness = 3;
+    D3D12_RECT borderRects[4] = {
+        {overviewScissor.left - borderThickness, overviewScissor.top - borderThickness,
+         overviewScissor.right + borderThickness, overviewScissor.top},
+        {overviewScissor.left - borderThickness, overviewScissor.bottom,
+         overviewScissor.right + borderThickness, overviewScissor.bottom + borderThickness},
+        {overviewScissor.left - borderThickness, overviewScissor.top,
+         overviewScissor.left, overviewScissor.bottom},
+        {overviewScissor.right, overviewScissor.top,
+         overviewScissor.right + borderThickness, overviewScissor.bottom}
     };
-
-    LightingConstants ambientConst = {};
-    ambientConst.EnableAmbient = 1;
-    mLightingCB->CopyData(static_cast<int>(lightCbIndex), ambientConst);
-    mCommandList->SetGraphicsRootConstantBufferView(2, lightingCbAddress(lightCbIndex));
-    mCommandList->DrawInstanced(3, 1, 0, 0);
-    ++lightCbIndex;
-
-    for (const auto& light : mLights) {
-        if (lightCbIndex >= LightingCbElementCount) {
-            break;
-        }
-
-        LightingConstants lightConst = {};
-        lightConst.EnableAmbient = 0;
-        lightConst.Light = light;
-        mLightingCB->CopyData(static_cast<int>(lightCbIndex), lightConst);
-        mCommandList->SetGraphicsRootConstantBufferView(2, lightingCbAddress(lightCbIndex));
-        mCommandList->DrawInstanced(3, 1, 0, 0);
-        ++lightCbIndex;
+    for (auto& rect : borderRects) {
+        rect.left = (std::max)(0L, rect.left);
+        rect.top = (std::max)(0L, rect.top);
+        rect.right = (std::min)(static_cast<LONG>(mClientWidth), rect.right);
+        rect.bottom = (std::min)(static_cast<LONG>(mClientHeight), rect.bottom);
     }
-
-    for (const auto& fl : mFallingLights) {
-        if (lightCbIndex >= LightingCbElementCount) {
-            break;
-        }
-
-        LightingConstants lightConst = {};
-        lightConst.EnableAmbient = 0;
-        lightConst.Light.Type = static_cast<unsigned int>(LightType::Point);
-        lightConst.Light.Position = fl.position;
-        lightConst.Light.Color = fl.color;
-        lightConst.Light.Intensity = fl.intensity;
-        lightConst.Light.Range = fl.range;
-        mLightingCB->CopyData(static_cast<int>(lightCbIndex), lightConst);
-        mCommandList->SetGraphicsRootConstantBufferView(2, lightingCbAddress(lightCbIndex));
-        mCommandList->DrawInstanced(3, 1, 0, 0);
-        ++lightCbIndex;
-    }
+    mCommandList->ClearRenderTargetView(rtv, borderColor, 4, borderRects);
 
     auto bbToPresent = CD3DX12_RESOURCE_BARRIER::Transition(
         CurrentBackBuffer(),
